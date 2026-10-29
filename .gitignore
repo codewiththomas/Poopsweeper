@@ -1,0 +1,19 @@
+# .NET
+bin/
+obj/
+*.user
+.vs/
+
+# Godot
+.godot/
+.mono/
+*.translation
+export_presets.cfg
+*.apk
+*.aab
+*.keystore
+
+# IDE / OS
+.idea/
+.vscode/
+Thumbs.db
