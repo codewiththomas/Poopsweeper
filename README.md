@@ -15,7 +15,20 @@ Minesweeper auf der Hundewiese: Räume alle Haufen, ohne reinzutreten. Godot 4.7
 - Godot **4.7.2 .NET** (Mono-Version) installieren: `winget install GodotEngine.GodotEngine.Mono`
 - `game/project.godot` im Godot-Editor öffnen und F5 drücken.
 - Wichtig: den Editor aus dem Paketordner starten (`...\WinGet\Packages\GodotEngine.GodotEngine.Mono_...\`), nicht über den winget-Alias – sonst findet Godot seine .NET-Dateien nicht.
-- Dev-Hilfen: `godot --path game -- --level=12` startet direkt Level 12, `-- --level=12 --demo` spielt ein paar Züge vor.
+- Dev-Hilfen: `godot --path game -- --level=12` startet direkt Level 12, `-- --level=12 --demo` spielt ein paar Züge vor, `-- --quick`, `-- --compendium`, `-- --campaign`, `-- --settings`, `-- --tutorial` öffnen den jeweiligen Bildschirm, `-- --lang=en` erzwingt eine Sprache.
+
+## Menü
+
+- **Kampagne:** Level 1, 2, 3 … mit steigender Schwierigkeit, Sterne und Freischaltung.
+- **Schnelles Spiel:** Einfach, Mittel, Schwer oder Individuell (Größe, Dichte, Hindernisse, Waldrand, Hund, Pfützen, Doppelhaufen, Sprinkler, Leben). Zählt nicht für die Kampagne.
+- **Kompendium:** Erklärt Steuerung und alle Mechaniken.
+- **Einstellungen:** Sprache (Deutsch/Englisch/automatisch), Effekt-Lautstärke, Vibration, Farbenblind-Modus, Oberflächengröße, Tutorial wiederholen, Fortschritt zurücksetzen.
+- **Tutorial:** Beim ersten Start der Kampagne führt ein kurzes, interaktives Tutorial durch das klassische 1-2-1-Muster.
+
+## Fairness
+
+Die ersten 12 Kampagnenlevel (und im Schnellen Spiel der Schalter „Ohne Raten lösbar“) sind garantiert per Logik lösbar. Dafür gibt es einen Solver im Core
+(`Solver.cs`), der auch Pfützen, Doppelhaufen und Sprinkler versteht. Der **Tipp** des Hundes nutzt denselben Solver und zeigt ein garantiert sicheres Feld.
 
 ## Steuerung
 
@@ -27,7 +40,7 @@ Minesweeper auf der Hundewiese: Räume alle Haufen, ohne reinzutreten. Godot 4.7
 | Zahl räumen (Chord) | Klick auf aufgedeckte Zahl | Tippen auf Zahl |
 | Zoom / Verschieben | Mausrad / Ziehen oder Mitteltaste | Pinch / Wischen |
 
-Tasten: `R` neu, `Esc` Menü, `1`/`2`/`3` Werkzeug.
+Tasten: `R` neu, `Esc` zurück, `1`/`2`/`3` Werkzeug, `H` Tipp.
 
 ## Level & Mechaniken
 

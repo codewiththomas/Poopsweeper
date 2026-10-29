@@ -7,31 +7,39 @@ namespace Poopsweeper;
 
 public partial class GameScreen : Control
 {
-    private static readonly Dictionary<int, string> Intros = new()
-    {
-        [1] = "Willkommen auf der Hundewiese!\n\nKlick = graben. Rechtsklick (am Handy: lange drücken) = Tüte auf einen vermuteten Haufen.\n" +
-              "Die Zahl sagt, wie viele Haufen in den 8 Nachbarfeldern liegen. Klick auf eine Zahl mit genug Tüten räumt die Nachbarn.\n" +
-              "Tritt nicht rein – du hast 3 Leben!\nMausrad = Zoom, Ziehen = Verschieben.",
-        [4] = "Hindernisse!\n\nBäume, Bänke, Büsche und Steine sind gesperrt. Sie zählen nie als Haufen, und der Waldrand ist nicht mehr gerade.",
-        [6] = "Der Schnüffelhund hilft dir!\n\nWähle \"Hund\" und tippe ein verdecktes Feld: Liegt dort ein Haufen, kommt eine Tüte drauf – sonst wird das Feld aufgedeckt. Nur wenige Einsätze pro Level.",
-        [8] = "Pfützen!\n\nAuf Pfützen steht eine Spanne wie \"1-2\": Die echte Zahl ist einer der beiden Werte.",
-        [12] = "Doppelhaufen!\n\nEin Doppelhaufen zählt 2 in den Nachbarzahlen. Tüte mehrfach tippen setzt zwei Tüten.",
-        [15] = "Sprinkler!\n\nEin aufgedeckter Sprinkler zeigt nur \"?\" – bis der Hund daran schnüffelt.",
-    };
-
     private Main _main = null!;
     private int _level;
+    private LevelParams? _custom; // gesetzt im Schnellen Spiel
+    private bool IsQuick => _custom != null;
     private GameSession _session = null!;
     private BoardView _board = null!;
     private HudBar _hud = null!;
-    private Button _digButton = null!, _flagButton = null!, _dogButton = null!, _nextButton = null!;
+    private Button _digButton = null!, _flagButton = null!, _dogButton = null!, _hintButton = null!, _nextButton = null!;
     private Control? _overlay;
+    private Control _toastLayer = null!;
+    private PanelContainer _toast = null!;
+    private Label _toastLabel = null!;
+    private Tween? _toastTween;
     private bool _resultShown;
+    private bool _focusLost;
 
     public void Init(Main main, int level)
     {
         _main = main;
         _level = level;
+    }
+
+    public void InitQuick(Main main, LevelParams p)
+    {
+        _main = main;
+        _custom = p;
+    }
+
+    /// <summary>Zurück dorthin, woher das Spiel gestartet wurde.</summary>
+    private void GoBack()
+    {
+        if (IsQuick) _main.ShowQuickSetup();
+        else _main.ShowCampaign();
     }
 
     public override void _Ready()
@@ -57,10 +65,27 @@ public partial class GameScreen : Control
         box.AddChild(_board);
 
         box.AddChild(BuildToolbar());
+        BuildToast();
 
         StartSession();
         if (OS.GetCmdlineUserArgs().Contains("--demo")) DevDemo();
         else MaybeShowIntro();
+    }
+
+    /// <summary>Spiel pausiert, solange das Fenster/die App nicht im Vordergrund ist.</summary>
+    public override void _Notification(int what)
+    {
+        switch ((long)what)
+        {
+            case NotificationApplicationFocusOut:
+            case NotificationApplicationPaused:
+                _focusLost = true;
+                break;
+            case NotificationApplicationFocusIn:
+            case NotificationApplicationResumed:
+                _focusLost = false;
+                break;
+        }
     }
 
     /// <summary>Dev-Hilfe für Screenshots: spielt ein paar Züge, damit alle Zelltypen sichtbar sind.</summary>
@@ -84,26 +109,30 @@ public partial class GameScreen : Control
         bar.AddThemeConstantOverride("separation", 8);
 
         var group = new ButtonGroup();
-        _digButton = ToolButton("Graben", group, Tool.Dig);
-        _flagButton = ToolButton("Tüte", group, Tool.Flag);
-        _dogButton = ToolButton("Hund", group, Tool.Dog);
+        _digButton = ToolButton(Loc.T("game.dig"), group, Tool.Dig);
+        _flagButton = ToolButton(Loc.T("game.flag"), group, Tool.Flag);
+        _dogButton = ToolButton(Loc.T("game.dog", 0), group, Tool.Dog);
         _digButton.ButtonPressed = true;
         bar.AddChild(_digButton);
         bar.AddChild(_flagButton);
         bar.AddChild(_dogButton);
 
+        _hintButton = new Button { Text = Loc.T("game.hint"), FocusMode = FocusModeEnum.None };
+        _hintButton.Pressed += UseHint;
+        bar.AddChild(_hintButton);
+
         bar.AddChild(new Control { SizeFlagsHorizontal = SizeFlags.ExpandFill });
 
-        _nextButton = new Button { Text = "Weiter", Visible = false };
+        _nextButton = new Button { Text = Loc.T("game.next"), Visible = false, FocusMode = FocusModeEnum.None };
         _nextButton.Pressed += () => _main.StartLevel(_level + 1);
         bar.AddChild(_nextButton);
 
-        var restart = new Button { Text = "Neu" };
+        var restart = new Button { Text = Loc.T("game.restart"), FocusMode = FocusModeEnum.None };
         restart.Pressed += Restart;
         bar.AddChild(restart);
 
-        var menu = new Button { Text = "Menü" };
-        menu.Pressed += _main.ShowMenu;
+        var menu = new Button { Text = Loc.T("game.menu"), FocusMode = FocusModeEnum.None };
+        menu.Pressed += GoBack;
         bar.AddChild(menu);
         return bar;
     }
@@ -113,20 +142,63 @@ public partial class GameScreen : Control
         var b = new Button { Text = text, ToggleMode = true, ButtonGroup = group, FocusMode = FocusModeEnum.None };
         b.Toggled += on =>
         {
-            if (on) _board.CurrentTool = tool;
+            if (!on) return;
+            _board.CurrentTool = tool;
+            _main.Audio.Play("click");
         };
         return b;
+    }
+
+    private void UseHint()
+    {
+        if (_session.UseHint()) _main.Audio.Play("hint");
+        else if (_session.DogCharges > 0) ShowToast(Loc.T("game.nohint"));
+    }
+
+    // ---------------------------------------------------------------- Meldung (Toast)
+
+    private void BuildToast()
+    {
+        _toastLayer = new Control { MouseFilter = MouseFilterEnum.Ignore };
+        AddChild(_toastLayer);
+        _toastLayer.SetAnchorsAndOffsetsPreset(LayoutPreset.FullRect);
+
+        var v = new VBoxContainer { MouseFilter = MouseFilterEnum.Ignore };
+        _toastLayer.AddChild(v);
+        v.SetAnchorsAndOffsetsPreset(LayoutPreset.FullRect);
+        v.AddChild(new Control { SizeFlagsVertical = SizeFlags.ExpandFill, MouseFilter = MouseFilterEnum.Ignore });
+
+        var center = new CenterContainer { MouseFilter = MouseFilterEnum.Ignore };
+        v.AddChild(center);
+        _toast = new PanelContainer { MouseFilter = MouseFilterEnum.Ignore, Modulate = new Color(1, 1, 1, 0) };
+        center.AddChild(_toast);
+        _toastLabel = new Label();
+        _toast.AddChild(_toastLabel);
+
+        v.AddChild(new Control { CustomMinimumSize = new Vector2(0, 90), MouseFilter = MouseFilterEnum.Ignore });
+    }
+
+    private void ShowToast(string text)
+    {
+        _toastLabel.Text = text;
+        _toastTween?.Kill();
+        _toast.Modulate = Colors.White;
+        _toastTween = CreateTween();
+        _toastTween.TweenInterval(1.8);
+        _toastTween.TweenProperty(_toast, "modulate:a", 0.0, 0.5);
     }
 
     // ---------------------------------------------------------------- Ablauf
 
     private void StartSession()
     {
-        _session = new GameSession(LevelCurve.For(_level));
+        _session = new GameSession(_custom ?? LevelCurve.For(_level));
         _session.Changed += OnChanged;
         _board.SetSession(_session);
         _hud.Session = _session;
+        _hud.Title = IsQuick ? Loc.T("hud.quick") : null;
         _dogButton.Visible = _session.Params.DogCharges > 0;
+        _hintButton.Visible = _session.Params.DogCharges > 0;
         _resultShown = false;
         _nextButton.Visible = false;
         _digButton.ButtonPressed = true;
@@ -138,6 +210,7 @@ public partial class GameScreen : Control
         _overlay?.QueueFree();
         _overlay = null;
         _session.Changed -= OnChanged;
+        if (_custom != null) _custom = _custom with { Seed = System.Random.Shared.Next() }; // frisches Feld
         StartSession();
     }
 
@@ -148,23 +221,33 @@ public partial class GameScreen : Control
         _resultShown = true;
         if (_session.State == GameState.Won)
         {
-            _main.RecordWin(_level, _session.Stars, _session.Elapsed);
-            _nextButton.Visible = true;
+            if (!IsQuick)
+            {
+                _main.RecordWin(_level, _session.Stars, _session.Elapsed);
+                _nextButton.Visible = true;
+            }
+            _main.Audio.Play("win");
+            Platform.Vibrate(60);
+        }
+        else
+        {
+            _main.Audio.Play("lose");
         }
         ShowResult();
     }
 
     private void UpdateUi()
     {
-        _dogButton.Text = $"Hund ({_session.DogCharges})";
+        _dogButton.Text = Loc.T("game.dog", _session.DogCharges);
         _dogButton.Disabled = _session.DogCharges == 0;
+        _hintButton.Disabled = _session.DogCharges == 0;
         if (_session.DogCharges == 0 && _dogButton.ButtonPressed) _digButton.ButtonPressed = true;
         _hud.QueueRedraw();
     }
 
     public override void _Process(double delta)
     {
-        _session.Tick(delta);
+        if (!_focusLost) _session.Tick(delta);
         if (_session.State == GameState.Playing) _hud.QueueRedraw();
     }
 
@@ -174,10 +257,11 @@ public partial class GameScreen : Control
         switch (key.Keycode)
         {
             case Key.R: Restart(); break;
-            case Key.Escape: _main.ShowMenu(); break;
+            case Key.Escape: GoBack(); break;
             case Key.Key1: _digButton.ButtonPressed = true; break;
             case Key.Key2: _flagButton.ButtonPressed = true; break;
             case Key.Key3 when !_dogButton.Disabled && _dogButton.Visible: _dogButton.ButtonPressed = true; break;
+            case Key.H when _hintButton.Visible && !_hintButton.Disabled: UseHint(); break;
         }
     }
 
@@ -185,24 +269,30 @@ public partial class GameScreen : Control
 
     private void MaybeShowIntro()
     {
-        if (!Intros.TryGetValue(_level, out var text) || _main.Save.Records.ContainsKey(_level)) return;
-        ShowPanel($"Level {_level}", text, stars: -1, new[] { ("Los geht's", (System.Action)CloseOverlay) });
+        string key = $"intro.{_level}";
+        if (IsQuick || _level <= 1 || !Loc.Has(key) || _main.Save.Records.ContainsKey(_level)) return;
+        ShowPanel(Loc.T("hud.level", _level), Loc.T(key), stars: -1, new[] { (Loc.T("game.go"), (System.Action)CloseOverlay) });
+    }
+
+    private static string Clock(double seconds)
+    {
+        int s = (int)seconds;
+        return $"{s / 60}:{s % 60:00}";
     }
 
     private void ShowResult()
     {
         bool won = _session.State == GameState.Won;
-        int secs = (int)_session.Elapsed;
         string body = won
-            ? $"Zeit {secs / 60}:{secs % 60:00} (Par {(int)_session.ParSeconds / 60}:{(int)_session.ParSeconds % 60:00})"
-            : "Alle Leben verbraucht. Der Hund guckt dich vorwurfsvoll an.";
+            ? Loc.T("result.wonbody", Clock(_session.Elapsed), Clock(_session.ParSeconds))
+            : Loc.T("result.lostbody");
 
         var buttons = new List<(string, System.Action)>();
-        if (won) buttons.Add(("Nächstes Level", () => _main.StartLevel(_level + 1)));
-        buttons.Add(("Nochmal", Restart));
-        buttons.Add(("Feld ansehen", CloseOverlay));
-        buttons.Add(("Menü", _main.ShowMenu));
-        ShowPanel(won ? "Wiese geräumt!" : "Reingetreten!", body, won ? _session.Stars : -1, buttons);
+        if (won && !IsQuick) buttons.Add((Loc.T("result.next"), () => _main.StartLevel(_level + 1)));
+        buttons.Add((IsQuick ? Loc.T("result.newgame") : Loc.T("result.again"), Restart));
+        buttons.Add((Loc.T("result.view"), CloseOverlay));
+        buttons.Add((Loc.T("common.back"), GoBack));
+        ShowPanel(won ? Loc.T("result.won") : Loc.T("result.lost"), body, won ? _session.Stars : -1, buttons);
     }
 
     private void CloseOverlay()
@@ -214,53 +304,7 @@ public partial class GameScreen : Control
     private void ShowPanel(string title, string body, int stars, IEnumerable<(string text, System.Action action)> buttons)
     {
         CloseOverlay();
-        var overlay = new Control();
-        AddChild(overlay);
-        overlay.SetAnchorsAndOffsetsPreset(LayoutPreset.FullRect);
-
-        var dim = new ColorRect { Color = new Color(0, 0, 0, 0.55f), MouseFilter = MouseFilterEnum.Stop };
-        overlay.AddChild(dim);
-        dim.SetAnchorsAndOffsetsPreset(LayoutPreset.FullRect);
-
-        var center = new CenterContainer();
-        overlay.AddChild(center);
-        center.SetAnchorsAndOffsetsPreset(LayoutPreset.FullRect);
-
-        var panel = new PanelContainer { CustomMinimumSize = new Vector2(480, 0) };
-        center.AddChild(panel);
-
-        var margin = new MarginContainer();
-        foreach (var side in new[] { "left", "right", "top", "bottom" })
-            margin.AddThemeConstantOverride($"margin_{side}", 18);
-        panel.AddChild(margin);
-
-        var box = new VBoxContainer();
-        box.AddThemeConstantOverride("separation", 14);
-        margin.AddChild(box);
-
-        var titleLabel = new Label { Text = title, HorizontalAlignment = HorizontalAlignment.Center };
-        titleLabel.AddThemeFontSizeOverride("font_size", 42);
-        titleLabel.AddThemeColorOverride("font_color", UiTheme.Accent);
-        box.AddChild(titleLabel);
-
-        if (stars >= 0) box.AddChild(new StarRow { Filled = stars, CustomMinimumSize = new Vector2(0, 80) });
-
-        var bodyLabel = new Label
-        {
-            Text = body,
-            AutowrapMode = TextServer.AutowrapMode.WordSmart,
-            CustomMinimumSize = new Vector2(440, 0),
-        };
-        bodyLabel.AddThemeFontSizeOverride("font_size", 22);
-        box.AddChild(bodyLabel);
-
-        foreach (var (text, action) in buttons)
-        {
-            var b = new Button { Text = text };
-            b.Pressed += action;
-            box.AddChild(b);
-        }
-        _overlay = overlay;
+        _overlay = Dialogs.Show(this, title, body, stars, buttons);
     }
 }
 
@@ -268,6 +312,7 @@ public partial class GameScreen : Control
 public partial class HudBar : Control
 {
     public GameSession? Session { get; set; }
+    public string? Title { get; set; }
 
     public override void _Draw()
     {
@@ -279,7 +324,7 @@ public partial class HudBar : Control
         float baseline = cy + (font.GetAscent(fs) - font.GetDescent(fs)) / 2f;
         float x = 8;
 
-        string levelText = s.Params.IsBoss ? $"Level {s.Params.Level} (Boss)" : $"Level {s.Params.Level}";
+        string levelText = Title ?? (s.Params.IsBoss ? Loc.T("hud.boss", s.Params.Level) : Loc.T("hud.level", s.Params.Level));
         DrawString(font, new Vector2(x, baseline), levelText, HorizontalAlignment.Left, -1, fs, Colors.White);
         x += font.GetStringSize(levelText, HorizontalAlignment.Left, -1, fs).X + 28;
 
@@ -306,7 +351,7 @@ public partial class HudBar : Control
         int secs = (int)s.Elapsed;
         int par = (int)s.ParSeconds;
         string time = $"{secs / 60}:{secs % 60:00}";
-        string parText = $"Par {par / 60}:{par % 60:00}";
+        string parText = Loc.T("hud.par", $"{par / 60}:{par % 60:00}");
         var timeColor = s.Elapsed <= s.ParSeconds ? Colors.White : new Color(1f, 0.6f, 0.5f);
 
         float parW = font.GetStringSize(parText, HorizontalAlignment.Left, -1, 20).X;
@@ -318,15 +363,43 @@ public partial class HudBar : Control
     }
 }
 
-/// <summary>Drei Sterne, die ersten <see cref="Filled"/> leuchten.</summary>
+/// <summary>Drei Sterne, die nacheinander einfliegen; die ersten <see cref="Filled"/> leuchten.</summary>
 public partial class StarRow : Control
 {
+    private const double FirstDelay = 0.25;
+    private const double Step = 0.35;
+    private const double PopTime = 0.3;
+
+    private double _t;
+    private int _sounded;
+
     public int Filled { get; set; }
+
+    public override void _Process(double delta)
+    {
+        _t += delta;
+        if (_sounded < 3 && _t >= FirstDelay + _sounded * Step)
+        {
+            if (_sounded < Filled) Main.Instance.Audio.Play("star", 1f + _sounded * 0.12f);
+            _sounded++;
+        }
+        if (_t < FirstDelay + 3 * Step + PopTime) QueueRedraw();
+    }
 
     public override void _Draw()
     {
         float r = Mathf.Min(Size.Y / 2f, 38f);
         for (int i = 0; i < 3; i++)
-            Icons.Star(this, new Vector2(Size.X / 2f + (i - 1) * r * 2.4f, Size.Y / 2f), r, i < Filled);
+        {
+            double local = (_t - (FirstDelay + i * Step)) / PopTime;
+            float scale = local <= 0 ? 0f : (float)EaseOutBack(Mathf.Min(1.0, local));
+            Icons.Star(this, new Vector2(Size.X / 2f + (i - 1) * r * 2.4f, Size.Y / 2f), r * scale, i < Filled);
+        }
+    }
+
+    private static double EaseOutBack(double x)
+    {
+        const double c1 = 1.70158, c3 = c1 + 1;
+        return 1 + c3 * System.Math.Pow(x - 1, 3) + c1 * System.Math.Pow(x - 1, 2);
     }
 }

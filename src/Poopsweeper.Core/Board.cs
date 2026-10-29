@@ -20,6 +20,8 @@ public struct Cell
     public bool Sniffed;
     /// <summary>Pfütze: untere Grenze der angezeigten Spanne (obere = +1).</summary>
     public byte PuddleLow;
+    /// <summary>Pfütze: 0 = echter Wert ist die obere Grenze, 1 = die untere.</summary>
+    public byte PuddleOff;
 }
 
 /// <summary>Was die Zahl einer aufgedeckten Zelle anzeigt.</summary>
@@ -45,6 +47,30 @@ public sealed class Board
         Height = height;
         _cells = new Cell[width * height];
     }
+
+    /// <summary>Tiefe Kopie (für Solver-Simulationen).</summary>
+    public Board Clone()
+    {
+        var b = new Board(Width, Height);
+        Array.Copy(_cells, b._cells, _cells.Length);
+        b.Populated = Populated;
+        return b;
+    }
+
+    /// <summary>Entfernt Haufen und Spezialfelder wieder (Layout bleibt), damit neu verteilt werden kann.</summary>
+    public void ClearPopulation()
+    {
+        for (int i = 0; i < _cells.Length; i++)
+        {
+            _cells[i].Poop = 0;
+            _cells[i].Special = SpecialKind.None;
+            _cells[i].PuddleLow = 0;
+        }
+        Populated = false;
+    }
+
+    /// <summary>Für handgebaute Felder (Tutorial): Haufen sind bereits gesetzt.</summary>
+    public void MarkPopulated() => Populated = true;
 
     public bool InBounds(int x, int y) => x >= 0 && y >= 0 && x < Width && y < Height;
 
@@ -124,14 +150,28 @@ public sealed class Board
         for (int i = puddles; i < puddles + sprinklers; i++) At(free[i].x, free[i].y).Special = SpecialKind.Sprinkler;
 
         // Pfützen-Spanne erst nach den Haufen festlegen.
-        foreach (var (x, y) in free.Take(puddles))
-        {
-            int n = Count(x, y);
-            int off = rng.Next(2);
-            At(x, y).PuddleLow = (byte)Math.Max(0, n - off);
-        }
+        foreach (var (x, y) in free.Take(puddles)) At(x, y).PuddleOff = (byte)rng.Next(2);
+        RefreshPuddles();
 
         Populated = true;
+    }
+
+    /// <summary>Berechnet die Pfützen-Spannen neu (nach dem Verschieben von Haufen).</summary>
+    public void RefreshPuddles()
+    {
+        foreach (var (x, y) in MeadowCells())
+        {
+            ref var c = ref At(x, y);
+            if (c.Special == SpecialKind.Puddle) c.PuddleLow = (byte)Math.Max(0, Count(x, y) - c.PuddleOff);
+        }
+    }
+
+    /// <summary>Verschiebt den Haufenwert einer Zelle auf eine andere (nur beim Erzeugen von Feldern).</summary>
+    public void MovePoop((int x, int y) from, (int x, int y) to)
+    {
+        At(to.x, to.y).Poop = At(from.x, from.y).Poop;
+        At(from.x, from.y).Poop = 0;
+        RefreshPuddles();
     }
 
     /// <summary>Deckt auf. Gibt die Zahl neu getretener Haufen zurück.</summary>

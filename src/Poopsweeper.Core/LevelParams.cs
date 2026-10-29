@@ -30,6 +30,9 @@ public sealed record LevelParams
     public double ParSecondsPerCell { get; init; } = 0.7;
     public bool IsBoss { get; init; }
 
+    /// <summary>Haufen so verteilen, dass das Feld ohne Raten lösbar ist.</summary>
+    public bool NoGuess { get; init; }
+
     /// <summary>Anzahl Haufen-Zellen für eine Wiese dieser Größe (lässt Platz für die sichere Startöffnung).</summary>
     public int PlannedPoopCells(int meadowCount) =>
         Math.Clamp((int)Math.Round(meadowCount * PoopDensity), 1, Math.Max(1, meadowCount - 10));

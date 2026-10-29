@@ -8,10 +8,15 @@ public sealed class LevelRecord
     public double BestTime { get; set; }
 }
 
-/// <summary>Spielfortschritt: freigeschaltete Level, Sterne, Bestzeiten.</summary>
+/// <summary>Spielfortschritt und Einstellungen: freigeschaltete Level, Sterne, Bestzeiten.</summary>
 public sealed class SaveData
 {
+    /// <summary>Format-Version des Spielstands (für spätere Migrationen).</summary>
+    public int Version { get; set; } = 2;
+
     public Dictionary<int, LevelRecord> Records { get; set; } = new();
+
+    public GameSettings Settings { get; set; } = new();
 
     public int HighestUnlocked => Records.Count == 0 ? 1 : Records.Keys.Max() + 1;
 
@@ -31,12 +36,22 @@ public sealed class SaveData
         r.BestTime = Math.Min(r.BestTime, time);
     }
 
+    /// <summary>Setzt Level-Fortschritt zurück, Einstellungen bleiben erhalten.</summary>
+    public void ResetProgress() => Records.Clear();
+
     public static SaveData Load(string path)
     {
         try
         {
             if (File.Exists(path))
-                return JsonSerializer.Deserialize<SaveData>(File.ReadAllText(path)) ?? new SaveData();
+            {
+                var data = JsonSerializer.Deserialize<SaveData>(File.ReadAllText(path)) ?? new SaveData();
+                data.Settings ??= new GameSettings();
+                data.Records ??= new Dictionary<int, LevelRecord>();
+                // Spielstände vor Version 2 hatten keine Einstellungen: Defaults sind bereits gesetzt.
+                data.Version = 2;
+                return data;
+            }
         }
         catch (Exception e) when (e is IOException or JsonException)
         {

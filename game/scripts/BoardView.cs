@@ -7,6 +7,9 @@ namespace Poopsweeper;
 
 public enum Tool { Dig, Flag, Dog }
 
+/// <summary>Was eine Eingabe auslösen würde (für das Tutorial, das nur bestimmte Aktionen erlaubt).</summary>
+public enum GuardAction { Dig, Flag, Sniff }
+
 /// <summary>Zeichnet die Wiese und übersetzt Maus-/Touch-Eingaben in Aktionen auf der GameSession.</summary>
 public partial class BoardView : Control
 {
@@ -26,7 +29,7 @@ public partial class BoardView : Control
     private float _minCs = 20f;
     private Vector2 _origin;
     private Vector2I _hover = new(-1, -1);
-    private bool _needsFit;
+    private bool _userMoved;
 
     // Maus
     private bool _mouseDown, _mouseDragged, _middleDown;
@@ -41,25 +44,35 @@ public partial class BoardView : Control
 
     public Tool CurrentTool { get; set; } = Tool.Dig;
 
+    /// <summary>Optionaler Filter: false = Aktion wird verworfen.</summary>
+    public Func<GuardAction, Vector2I, bool>? Guard { get; set; }
+
+    /// <summary>Hervorgehobene Felder (Tutorial).</summary>
+    public List<Vector2I> Highlights { get; set; } = new();
+
     public override void _Ready()
     {
         ClipContents = true;
         Resized += () =>
         {
             if (_session == null) return;
-            // Beim ersten echten Layout einpassen; danach nur noch Zoom/Pan beibehalten.
-            Fit(keepZoom: !_needsFit);
-            _needsFit = false;
+            // Einpassen, solange der Spieler nicht selbst gezoomt/verschoben hat (Layout läuft oft in mehreren Durchgängen).
+            Fit(keepZoom: _userMoved);
         };
     }
 
     public void SetSession(GameSession session)
     {
-        if (_session != null) _session.Changed -= QueueRedraw;
+        if (_session != null) _session.Changed -= OnSessionChanged;
         _session = session;
-        _session.Changed += QueueRedraw;
+        _session.Changed += OnSessionChanged;
         _touches.Clear();
-        _needsFit = Size.X < 1f || Size.Y < 1f; // Layout noch nicht gelaufen → beim ersten Resized einpassen
+        _revealAnims.Clear();
+        _flagAnims.Clear();
+        _particles.Clear();
+        _snapshot = TakeSnapshot();
+        _lastClick = new Vector2I(-1, -1);
+        _userMoved = false;
         Fit(keepZoom: false);
         QueueRedraw();
     }
@@ -96,6 +109,7 @@ public partial class BoardView : Control
     private void ZoomAt(float factor, Vector2 anchor)
     {
         float newCs = Mathf.Clamp(_cs * factor, _minCs, MaxCell);
+        _userMoved = true;
         _origin = anchor - (anchor - _origin) * (newCs / _cs);
         _cs = newCs;
         ClampOrigin();
@@ -104,6 +118,7 @@ public partial class BoardView : Control
 
     private void Pan(Vector2 delta)
     {
+        _userMoved = true;
         _origin += delta;
         ClampOrigin();
         QueueRedraw();
@@ -115,10 +130,172 @@ public partial class BoardView : Control
         return new Vector2I(Mathf.FloorToInt(v.X), Mathf.FloorToInt(v.Y));
     }
 
+    // ---------------------------------------------------------------- Effekte ("Juice")
+
+    private const double RevealAnimTime = 0.28;
+    private const double FlagAnimTime = 0.30;
+    private const double ShakeTime = 0.35;
+
+    private struct Particle
+    {
+        public Vector2 Pos, Vel;
+        public double Born, Life;
+        public Color Color;
+        public float Size;
+    }
+
+    private readonly Dictionary<int, double> _revealAnims = new();
+    private readonly Dictionary<int, double> _flagAnims = new();
+    private readonly List<Particle> _particles = new();
+    private int[] _snapshot = Array.Empty<int>();
+    private Vector2I _lastClick = new(-1, -1);
+    private double _shakeStart = -10;
+    private Vector2 _shake;
+    private readonly Random _fx = new(7);
+
+    private static double Now => Time.GetTicksMsec() / 1000.0;
+
+    private static int Encode(in Cell c) =>
+        (c.State == CellState.Revealed ? 1 : 0) | (c.Hit ? 2 : 0) | (c.Flags << 2) | (c.Question ? 16 : 0);
+
+    private int[] TakeSnapshot()
+    {
+        var b = _session!.Board;
+        var snap = new int[b.Width * b.Height];
+        for (int y = 0; y < b.Height; y++)
+            for (int x = 0; x < b.Width; x++)
+                snap[y * b.Width + x] = Encode(b.At(x, y));
+        return snap;
+    }
+
+    /// <summary>Vergleicht mit dem letzten Stand und löst Animationen, Töne und Vibration aus.</summary>
+    private void OnSessionChanged()
+    {
+        if (_session == null) return;
+        var b = _session.Board;
+        var now = _snapshot.Length == b.Width * b.Height ? _snapshot : TakeSnapshot();
+        bool quiet = _session.State is GameState.Won or GameState.Lost;
+        var audio = Main.Instance.Audio;
+
+        int revealed = 0, flagsAdded = 0, flagsRemoved = 0;
+        var hitCells = new List<(int x, int y)>();
+        double t0 = Now;
+
+        for (int y = 0; y < b.Height; y++)
+        {
+            for (int x = 0; x < b.Width; x++)
+            {
+                int id = y * b.Width + x;
+                int before = now[id];
+                int after = Encode(b.At(x, y));
+                if (before == after) continue;
+
+                if ((after & 1) != 0 && (before & 1) == 0)
+                {
+                    if ((after & 2) != 0) hitCells.Add((x, y));
+                    else
+                    {
+                        revealed++;
+                        double dist = _lastClick.X < 0 ? 0 : Math.Sqrt((x - _lastClick.X) * (x - _lastClick.X) + (y - _lastClick.Y) * (y - _lastClick.Y));
+                        _revealAnims[id] = t0 + Math.Min(0.45, dist * 0.03);
+                    }
+                }
+                if (((after >> 2) & 3) > ((before >> 2) & 3) && !quiet) { flagsAdded++; _flagAnims[id] = t0; }
+                else if (((after >> 2) & 3) < ((before >> 2) & 3) && (after & 16) == 0) flagsRemoved++;
+            }
+        }
+        _snapshot = TakeSnapshot();
+
+        foreach (var (x, y) in hitCells) SpawnSplat(x, y);
+        if (hitCells.Count > 0)
+        {
+            _shakeStart = t0;
+            if (!quiet || _session.State == GameState.Lost) audio.Play("splat");
+            Platform.Vibrate(120);
+        }
+        else if (revealed > 0 && !quiet) audio.Play("dig", 0.9f + (float)_fx.NextDouble() * 0.25f);
+        if (flagsAdded > 0) audio.Play("flag");
+        else if (flagsRemoved > 0 && revealed == 0 && hitCells.Count == 0) audio.Play("unflag");
+        if (flagsAdded > 0) Platform.Vibrate(20);
+
+        QueueRedraw();
+    }
+
+    private void SpawnSplat(int x, int y)
+    {
+        var c = CellPos(x, y) + new Vector2(_cs, _cs) * 0.5f;
+        double now = Now;
+        for (int i = 0; i < 18; i++)
+        {
+            double a = _fx.NextDouble() * Math.Tau;
+            float speed = 80f + (float)_fx.NextDouble() * 260f;
+            _particles.Add(new Particle
+            {
+                Pos = c,
+                Vel = new Vector2((float)Math.Cos(a), (float)Math.Sin(a)) * speed,
+                Born = now,
+                Life = 0.5 + _fx.NextDouble() * 0.4,
+                Color = _fx.Next(3) == 0 ? Icons.PoopLight : Icons.PoopBrown,
+                Size = _cs * (0.05f + (float)_fx.NextDouble() * 0.08f),
+            });
+        }
+    }
+
+    private void UpdateEffects(double delta)
+    {
+        double now = Now;
+        List<int>? done = null;
+        foreach (var kv in _revealAnims)
+            if (now - kv.Value > RevealAnimTime) (done ??= new()).Add(kv.Key);
+        if (done != null) foreach (int id in done) _revealAnims.Remove(id);
+
+        done = null;
+        foreach (var kv in _flagAnims)
+            if (now - kv.Value > FlagAnimTime) (done ??= new()).Add(kv.Key);
+        if (done != null) foreach (int id in done) _flagAnims.Remove(id);
+
+        for (int i = _particles.Count - 1; i >= 0; i--)
+        {
+            var p = _particles[i];
+            if (now - p.Born > p.Life) { _particles.RemoveAt(i); continue; }
+            p.Vel += new Vector2(0, 700f) * (float)delta;
+            p.Pos += p.Vel * (float)delta;
+            _particles[i] = p;
+        }
+
+        double st = now - _shakeStart;
+        if (st < ShakeTime)
+        {
+            float amp = (float)(1 - st / ShakeTime) * Mathf.Min(10f, _cs * 0.22f);
+            _shake = new Vector2((float)(_fx.NextDouble() - 0.5), (float)(_fx.NextDouble() - 0.5)) * 2f * amp;
+        }
+        else _shake = Vector2.Zero;
+
+        if (_revealAnims.Count > 0 || _flagAnims.Count > 0 || _particles.Count > 0 || st < ShakeTime + 0.05
+            || _session?.CurrentHint != null || Highlights.Count > 0)
+            QueueRedraw();
+    }
+
+    private static double EaseOutBack(double x)
+    {
+        x = Math.Clamp(x, 0, 1);
+        const double c1 = 1.70158, c3 = c1 + 1;
+        return 1 + c3 * Math.Pow(x - 1, 3) + c1 * Math.Pow(x - 1, 2);
+    }
+
+    private Color[] Palette() => Main.Instance.Settings.ColorBlind ? ColorBlindColors : NumberColors;
+
+    private static readonly Color[] ColorBlindColors =
+    {
+        Colors.Transparent, new(0.00f, 0.35f, 0.70f), new(0.80f, 0.38f, 0.00f), new(0.70f, 0.00f, 0.45f),
+        new(0.00f, 0.42f, 0.42f), new(0.30f, 0.10f, 0.10f), new(0.45f, 0.45f, 0.00f), Colors.Black, new(0.35f, 0.35f, 0.35f),
+    };
+
     // ---------------------------------------------------------------- Eingabe
 
     public override void _Process(double delta)
     {
+        UpdateEffects(delta);
         if (_touches.Count == 1 && !_touchMoved && !_longPressFired)
         {
             _touchTime += delta;
@@ -260,6 +437,9 @@ public partial class BoardView : Control
     private void Primary(Vector2I cell)
     {
         if (_session == null) return;
+        _lastClick = cell;
+        var action = CurrentTool switch { Tool.Flag => GuardAction.Flag, Tool.Dog => GuardAction.Sniff, _ => GuardAction.Dig };
+        if (Guard != null && !Guard(action, cell)) return;
         switch (CurrentTool)
         {
             case Tool.Dig: _session.Reveal(cell.X, cell.Y); break;
@@ -268,7 +448,11 @@ public partial class BoardView : Control
         }
     }
 
-    private void Secondary(Vector2I cell) => _session?.ToggleFlag(cell.X, cell.Y);
+    private void Secondary(Vector2I cell)
+    {
+        if (Guard != null && !Guard(GuardAction.Flag, cell)) return;
+        _session?.ToggleFlag(cell.X, cell.Y);
+    }
 
     // ---------------------------------------------------------------- Zeichnen
 
@@ -285,9 +469,29 @@ public partial class BoardView : Control
         int y1 = Math.Min(board.Height - 1, Mathf.FloorToInt((Size.Y - _origin.Y) / _cs));
 
         // Ebene 1: Boden, Wald, Zäune, Zellinhalt
+        double now = Now;
         for (int y = y0; y <= y1; y++)
+        {
             for (int x = x0; x <= x1; x++)
+            {
+                if (!_revealAnims.TryGetValue(y * board.Width + x, out double start))
+                {
+                    DrawCellBase(board, x, y, font);
+                    continue;
+                }
+                double t = (now - start) / RevealAnimTime;
+                if (t < 0)
+                {
+                    DrawCellBase(board, x, y, font, asHidden: true); // wartet noch auf seine Welle
+                    continue;
+                }
+                float s = 0.55f + 0.45f * (float)EaseOutBack(t);
+                var center = CellPos(x, y) + new Vector2(_cs, _cs) * 0.5f;
+                DrawSetTransform(center * (1 - s), 0, new Vector2(s, s));
                 DrawCellBase(board, x, y, font);
+                DrawSetTransform(Vector2.Zero, 0, Vector2.One);
+            }
+        }
 
         // Ebene 2: Hindernisse (über Zellgrenzen hinweg)
         for (int y = y0 - 1; y <= y1; y++)
@@ -308,6 +512,28 @@ public partial class BoardView : Control
             }
         }
 
+        // Hervorhebungen (Tutorial): goldener, pulsierender Rahmen
+        foreach (var h in Highlights)
+        {
+            if (!board.InBounds(h.X, h.Y)) continue;
+            float pulse = 0.5f + 0.5f * Mathf.Sin((float)now * 5f);
+            var gold = new Color(1f, 0.82f, 0.2f);
+            var hr = new Rect2(CellPos(h.X, h.Y), new Vector2(_cs, _cs)).Grow(-1f);
+            DrawRect(hr, new Color(gold, 0.12f + 0.16f * pulse));
+            DrawRect(hr, gold, false, 3f + 2f * pulse);
+        }
+
+        // Tipp des Hundes: pulsierender Rahmen
+        if (_session.CurrentHint is { } hint && board.InBounds(hint.X, hint.Y))
+        {
+            float pulse = 0.5f + 0.5f * Mathf.Sin((float)now * 6f);
+            var hc = hint.Kind == HintKind.Safe ? new Color(0.2f, 0.95f, 0.3f) : new Color(1f, 0.25f, 0.25f);
+            var hr = new Rect2(CellPos(hint.X, hint.Y), new Vector2(_cs, _cs)).Grow(-1f);
+            DrawRect(hr, new Color(hc, 0.18f + 0.18f * pulse));
+            DrawRect(hr, hc, false, 3f + 2f * pulse);
+            Icons.Paw(this, hr.GetCenter(), _cs * 0.7f, new Color(1f, 1f, 1f, 0.9f));
+        }
+
         // Hover-Rahmen
         if (_hover.X >= 0 && board.IsMeadow(_hover.X, _hover.Y) && _session.State is GameState.Ready or GameState.Playing)
         {
@@ -319,13 +545,27 @@ public partial class BoardView : Control
             };
             DrawRect(new Rect2(CellPos(_hover.X, _hover.Y), new Vector2(_cs, _cs)), col, false, 2.5f);
         }
+
+        // Partikel (Haufen-Spritzer)
+        foreach (var p in _particles)
+        {
+            float life = (float)Mathf.Clamp(1.0 - (now - p.Born) / p.Life, 0, 1);
+            DrawCircle(p.Pos, p.Size * (0.4f + 0.6f * life), new Color(p.Color, life));
+        }
     }
 
-    private Vector2 CellPos(int x, int y) => _origin + new Vector2(x, y) * _cs;
+    private Vector2 CellPos(int x, int y) => _origin + _shake + new Vector2(x, y) * _cs;
 
-    private void DrawCellBase(Board board, int x, int y, Font font)
+    private void DrawCellBase(Board board, int x, int y, Font font, bool asHidden = false)
     {
-        ref var c = ref board.At(x, y);
+        Cell cell = board.At(x, y);
+        if (asHidden)
+        {
+            cell.State = CellState.Hidden;
+            cell.Flags = 0;
+            cell.Question = false;
+        }
+        ref var c = ref cell;
         var pos = CellPos(x, y);
         var rect = new Rect2(pos, new Vector2(_cs, _cs));
         bool alt = ((x + y) & 1) == 0;
@@ -351,7 +591,8 @@ public partial class BoardView : Control
 
             if (c.Flags > 0)
             {
-                Icons.Bag(this, rect.GetCenter(), _cs);
+                float bagScale = _flagAnims.TryGetValue(y * board.Width + x, out double fs0) ? (float)EaseOutBack((Now - fs0) / FlagAnimTime) : 1f;
+                Icons.Bag(this, rect.GetCenter(), _cs * Mathf.Max(0.01f, bagScale));
                 if (c.Flags > 1) DrawCentered(font, "2", rect, _cs * 0.42f, Colors.White, new Vector2(0, _cs * 0.12f));
             }
             else if (c.Question)
@@ -397,7 +638,8 @@ public partial class BoardView : Control
         }
         else if (info.Min > 0)
         {
-            var color = NumberColors[Math.Min(info.Min, NumberColors.Length - 1)];
+            var pal = Palette();
+            var color = pal[Math.Min(info.Min, pal.Length - 1)];
             DrawCentered(font, info.Min.ToString(), rect, _cs * 0.66f, color, Vector2.Zero);
         }
 

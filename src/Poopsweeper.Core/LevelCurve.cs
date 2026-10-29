@@ -3,6 +3,9 @@ namespace Poopsweeper.Core;
 /// <summary>Schwierigkeitskurve: Level-Nummer → LevelParams. Jedes 5. Level ist ein Bosslevel.</summary>
 public static class LevelCurve
 {
+    /// <summary>Bis zu diesem Level garantiert der Generator Felder ohne Raten (danach klassisch, mit Hund-Tipp).</summary>
+    public const int NoGuessUntilLevel = 12;
+
     public const int MaxWidth = 34;
     public const int MaxHeight = 22;
 
@@ -41,6 +44,7 @@ public static class LevelCurve
             SprinklerCount = level < 15 ? 0 : Math.Min(6, 1 + (level - 15) / 3),
             Lives = 3,
             IsBoss = boss,
+            NoGuess = level <= NoGuessUntilLevel,
         };
     }
 }

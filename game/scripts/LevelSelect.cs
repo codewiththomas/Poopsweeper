@@ -26,7 +26,7 @@ public partial class LevelSelect : Control
         box.AddThemeConstantOverride("separation", 10);
         margin.AddChild(box);
 
-        var title = new Label { Text = "Poopsweeper", HorizontalAlignment = HorizontalAlignment.Center };
+        var title = new Label { Text = Loc.T("campaign.title"), HorizontalAlignment = HorizontalAlignment.Center };
         title.AddThemeFontSizeOverride("font_size", 64);
         title.AddThemeColorOverride("font_color", Icons.PoopLight);
         box.AddChild(title);
@@ -35,7 +35,7 @@ public partial class LevelSelect : Control
         foreach (var r in _main.Save.Records.Values) totalStars += r.Stars;
         var sub = new Label
         {
-            Text = $"Räume die Hundewiese – Sterne: {totalStars}",
+            Text = Loc.T("campaign.sub", totalStars),
             HorizontalAlignment = HorizontalAlignment.Center,
         };
         sub.AddThemeColorOverride("font_color", new Color(0.8f, 0.9f, 0.8f));
@@ -47,6 +47,10 @@ public partial class LevelSelect : Control
             HorizontalScrollMode = ScrollContainer.ScrollMode.Disabled,
         };
         box.AddChild(scroll);
+
+        var back = new Button { Text = Loc.T("common.back"), FocusMode = FocusModeEnum.None };
+        back.Pressed += _main.ShowHome;
+        box.AddChild(back);
 
         _grid = new GridContainer { SizeFlagsHorizontal = SizeFlags.ExpandFill };
         _grid.AddThemeConstantOverride("h_separation", 12);
@@ -66,7 +70,11 @@ public partial class LevelSelect : Control
                 SizeFlagsHorizontal = SizeFlags.ExpandFill,
             };
             int captured = level;
-            tile.Pressed += () => _main.StartLevel(captured);
+            tile.Pressed += () =>
+            {
+                _main.Audio.Play("click");
+                _main.StartLevel(captured);
+            };
             _grid.AddChild(tile);
         }
 

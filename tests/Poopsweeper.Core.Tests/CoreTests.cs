@@ -338,3 +338,28 @@ public class SaveDataTests
         finally { File.Delete(path); }
     }
 }
+
+public class CustomSettingsTests
+{
+    [Fact]
+    public void Presets_ProduceConnectedPlayableBoards()
+    {
+        foreach (var preset in new[] { CustomSettings.Easy, CustomSettings.Medium, CustomSettings.Hard })
+        {
+            for (int seed = 0; seed < 10; seed++)
+            {
+                var s = new GameSession(preset.ToParams(seed));
+                Assert.True(LevelGenerator.IsConnected(s.Board));
+                Assert.Equal(0, s.Params.Level);
+            }
+        }
+    }
+
+    [Fact]
+    public void ObstacleBudget_IsSplitIntoShapes()
+    {
+        var p = CustomSettings.Hard.ToParams(1);
+        Assert.Equal(CustomSettings.Hard.Obstacles, p.TreeCount + p.BenchCount + p.BushCount + p.RockCount);
+        Assert.True(p.TreeCount > 0);
+    }
+}
